@@ -1,128 +1,369 @@
-import time
-import gspread
-import subprocess
+import re
 from datetime import datetime, timedelta
-from oauth2client.service_account import ServiceAccountCredentials
 
-# --- CONFIGURAÇÕES ---
+import gspread
+from google.oauth2.service_account import Credentials
+from gspread.utils import rowcol_to_a1
+
+
+# =========================================================
+# CONFIGURAÇÕES
+# =========================================================
 ARQUIVO_JSON_GOOGLE = "dados-google.json"
-ID_PLANILHA_OFICIAL = "1bUvHLoUAmT4vcFy7J_qN5SendCl72Ih7ZLnF6UGd8VI" 
+NOME_ARQUIVO_MODELO = "Preço teste TRRs %m/%y"
+INTERVALO_LEITURA = "A1:AD1000"
 
-def preparar_aba():
-    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    creds = ServiceAccountCredentials.from_json_keyfile_name(ARQUIVO_JSON_GOOGLE, scope)
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+
+TITULOS_PROIBIDOS = [
+    "PREÇO DO PRODUTO NA BASE",
+    "PRECO DO PRODUTO NA BASE",
+]
+
+
+# =========================================================
+# CONEXÃO
+# =========================================================
+def conectar_cliente():
+    creds = Credentials.from_service_account_file(
+        ARQUIVO_JSON_GOOGLE,
+        scopes=SCOPES
+    )
     client = gspread.authorize(creds)
-    
+    return client, creds.service_account_email
+
+
+def abrir_planilha_do_mes():
+    client, email_servico = conectar_cliente()
+    nome_arquivo = datetime.now().strftime(NOME_ARQUIVO_MODELO)
+
+    print("🔐 Conta de serviço:", email_servico)
+    print("🔎 Procurando arquivo do mês:", nome_arquivo)
+
     try:
-        ss = client.open_by_key(ID_PLANILHA_OFICIAL)
-        print(f"✅ Conectado à planilha!")
+        ss = client.open(nome_arquivo)
+        print("✅ Arquivo encontrado:", ss.title)
+        return ss
     except Exception as e:
-        print(f"❌ Erro ao abrir a planilha: {e}")
+        print(f"❌ Não foi possível abrir o arquivo do mês: {nome_arquivo}")
+        print("Detalhe:", repr(e))
+        return None
+
+
+# =========================================================
+# DATAS
+# =========================================================
+def proximo_dia_util(data_base):
+    data = data_base + timedelta(days=1)
+    while data.weekday() >= 5:
+        data += timedelta(days=1)
+    return data
+
+
+def dia_util_anterior(data_base):
+    data = data_base - timedelta(days=1)
+    while data.weekday() >= 5:
+        data -= timedelta(days=1)
+    return data
+
+
+# =========================================================
+# ABAS
+# =========================================================
+def encontrar_aba_base(lista_abas, data_alvo_dt):
+    for i in range(1, 15):
+        busca = (data_alvo_dt - timedelta(days=i)).strftime("%d-%m")
+        for aba in lista_abas:
+            if aba.title.strip() == f"Preço {busca}":
+                print("✅ Aba base encontrada:", aba.title)
+                return aba
+
+    for i in range(1, 15):
+        busca = (data_alvo_dt - timedelta(days=i)).strftime("%d-%m")
+        for aba in lista_abas:
+            if busca in aba.title:
+                print("✅ Aba base encontrada:", aba.title)
+                return aba
+
+    print("⚠️ Nenhuma aba anterior encontrada. Usando a primeira aba.")
+    return lista_abas[0]
+
+
+# =========================================================
+# UTILITÁRIOS
+# =========================================================
+def normalizar(txt):
+    return str(txt).strip().upper()
+
+
+def linha_para_texto(linha):
+    return " | ".join(str(c).strip() for c in linha if str(c).strip())
+
+
+def eh_titulo_proibido(valor):
+    texto = normalizar(valor)
+    return texto in [normalizar(x) for x in TITULOS_PROIBIDOS]
+
+
+def expandir_linha(linha, tamanho):
+    while len(linha) < tamanho:
+        linha.append("")
+    return linha
+
+
+# =========================================================
+# LOCALIZAÇÃO DOS BLOCOS FOB
+# =========================================================
+def localizar_blocos_fob(dados):
+    blocos = []
+
+    for i, linha in enumerate(dados):
+        for c, valor in enumerate(linha):
+            texto = normalizar(valor)
+
+            if not texto:
+                continue
+
+            if texto.startswith("FOB -"):
+                blocos.append((texto, i, c))
+
+    return blocos
+
+
+def achar_fim_bloco_fob(dados, linha_inicio, col_titulo):
+    r = linha_inicio + 1
+
+    while r < len(dados):
+        for c, valor in enumerate(dados[r]):
+            texto = normalizar(valor)
+
+            if not texto:
+                continue
+
+            if texto.startswith("FOB -") and abs(c - col_titulo) <= 8:
+                return r - 1
+
+        r += 1
+
+    return len(dados) - 1
+
+
+def encontrar_linha_companhia_e_coluna(dados, linha_titulo, fim, col_titulo):
+    for r in range(linha_titulo, min(fim + 1, linha_titulo + 8)):
+        for c, valor in enumerate(dados[r]):
+            if str(valor).strip().lower() == "companhia" and abs(c - col_titulo) <= 5:
+                return r, c
+    return None, None
+
+
+def encontrar_linha_datas_por_offset(dados, linha_titulo, fim, col_titulo):
+    padrao_data = re.compile(r"^\d{2}/\d{2}/\d{4}$")
+    candidatos = [linha_titulo + 2, linha_titulo + 3, linha_titulo + 4, linha_titulo + 5]
+
+    for r in candidatos:
+        if r >= len(dados) or r > fim:
+            continue
+
+        linha = [str(x).strip() for x in dados[r]]
+        grupos = []
+
+        inicio_busca = max(0, col_titulo - 1)
+        fim_busca = min(len(linha) - 2, col_titulo + 20)
+
+        for j in range(inicio_busca, fim_busca):
+            a = linha[j]
+            b = linha[j + 1]
+            c = linha[j + 2]
+
+            if padrao_data.match(a) and padrao_data.match(b) and "Dif" in c:
+                grupos.append((j, j + 1, j + 2))
+
+        if grupos:
+            return r, grupos
+
+    return None, []
+
+
+def linha_parece_dado_empresa(linha, col_empresa):
+    if col_empresa is None or col_empresa >= len(linha):
+        return False
+
+    nome = str(linha[col_empresa]).strip()
+    if not nome:
+        return False
+
+    nome_up = nome.upper()
+
+    if nome_up == "COMPANHIA":
+        return False
+
+    if nome_up.startswith("OBS."):
+        return False
+
+    if nome_up.startswith("FOB -"):
+        return False
+
+    return True
+
+
+# =========================================================
+# ALTERAÇÕES SEGURAS
+# =========================================================
+def construir_alteracoes_seguras_fob(dados_formatados, dados_formulas, data_ontem, data_hoje):
+    alteracoes = []
+    blocos = localizar_blocos_fob(dados_formatados)
+
+    if not blocos:
+        print("⚠️ Nenhum bloco FOB foi encontrado.")
+        return alteracoes
+
+    print(f"📦 Blocos FOB encontrados: {len(blocos)}")
+
+    for titulo, linha_titulo, col_titulo in blocos:
+        if eh_titulo_proibido(titulo):
+            continue
+
+        fim = achar_fim_bloco_fob(dados_formatados, linha_titulo, col_titulo)
+
+        linha_companhia, col_empresa = encontrar_linha_companhia_e_coluna(
+            dados_formatados,
+            linha_titulo,
+            fim,
+            col_titulo
+        )
+
+        linha_datas, grupos = encontrar_linha_datas_por_offset(
+            dados_formatados,
+            linha_titulo,
+            fim,
+            col_titulo
+        )
+
+        if linha_companhia is None or col_empresa is None:
+            print(f"⚠️ Não achei 'Companhia' no bloco: {titulo}")
+            continue
+
+        if linha_datas is None or not grupos:
+            print(f"⚠️ Não achei os pares de data no bloco: {titulo}")
+            print("----- DEBUG BLOCO -----")
+            for rr in range(linha_titulo, min(fim + 1, linha_titulo + 8)):
+                print(rr + 1, dados_formatados[rr])
+            print("-----------------------")
+            continue
+
+        inicio_dados = linha_datas + 1
+        max_col = max(g[2] for g in grupos)
+
+        print(f"✅ Bloco FOB pronto para edição: {titulo}")
+
+        # Atualiza o cabeçalho das datas
+        for col_ontem, col_hoje, _ in grupos:
+            alteracoes.append({
+                "range": rowcol_to_a1(linha_datas + 1, col_ontem + 1),
+                "values": [[data_ontem]]
+            })
+            alteracoes.append({
+                "range": rowcol_to_a1(linha_datas + 1, col_hoje + 1),
+                "values": [[data_hoje]]
+            })
+
+        # Move hoje -> ontem e limpa hoje somente se não for fórmula
+        for r in range(inicio_dados, fim + 1):
+            dados_formatados[r] = expandir_linha(dados_formatados[r], max_col + 1)
+            dados_formulas[r] = expandir_linha(dados_formulas[r], max_col + 1)
+
+            if not linha_parece_dado_empresa(dados_formatados[r], col_empresa):
+                continue
+
+            for col_ontem, col_hoje, col_dif in grupos:
+                valor_hoje_fmt = dados_formatados[r][col_hoje]
+                valor_hoje_formula = dados_formulas[r][col_hoje]
+
+                # copia o valor visível da coluna "hoje" para a coluna "ontem"
+                alteracoes.append({
+                    "range": rowcol_to_a1(r + 1, col_ontem + 1),
+                    "values": [[valor_hoje_fmt]]
+                })
+
+                # limpa "hoje" apenas se não for fórmula
+                if not str(valor_hoje_formula).startswith("="):
+                    alteracoes.append({
+                        "range": rowcol_to_a1(r + 1, col_hoje + 1),
+                        "values": [[""]]
+                    })
+
+                # NÃO mexe na coluna Dif. (R$)
+
+    return alteracoes
+
+
+# =========================================================
+# PRINCIPAL
+# =========================================================
+def preparar_aba():
+    ss = abrir_planilha_do_mes()
+    if not ss:
         return
 
-    # 1. DEFINIÇÃO DAS DATAS
-    agora = datetime.now()
-    hoje_str = agora.strftime("%d-%m")
-    
-    lista_abas = ss.worksheets()
-    nomes_abas = [aba.title for aba in lista_abas]
-
-    # LÓGICA DE DECISÃO: Criar a de hoje ou a de amanhã?
-    aba_hoje_existe = any(hoje_str in nome for nome in nomes_abas)
-
-    if not aba_hoje_existe:
-        data_alvo_dt = agora
-        print(f"📅 Aba de hoje ({hoje_str}) não encontrada. Criando para HOJE.")
-    else:
-        data_alvo_dt = agora + timedelta(days=1)
-        # Pular fim de semana
-        if agora.weekday() == 4: data_alvo_dt = agora + timedelta(days=3)
-        elif data_alvo_dt.weekday() == 5: data_alvo_dt += timedelta(days=2)
-        elif data_alvo_dt.weekday() == 6: data_alvo_dt += timedelta(days=1)
-        print(f"📅 Aba de hoje já existe. Preparando para o PRÓXIMO DIA ÚTIL.")
-
-    novo_nome_aba = data_alvo_dt.strftime("Preço %d-%m")
-    data_alvo_texto = data_alvo_dt.strftime("%d/%m/%Y")
-    
-    # 2. IDENTIFICAR ABA BASE E POSIÇÃO DE INSERÇÃO
-    # Definimos a aba base (fallback para a primeira)
-    aba_base = lista_abas[0]
-    for i in range(1, 10):
-        busca_retroativa = (data_alvo_dt - timedelta(days=i)).strftime("%d-%m")
-        for aba in lista_abas:
-            if busca_retroativa in aba.title:
-                aba_base = aba
-                break
-        if aba_base and busca_retroativa in aba_base.title: break
-
-    # LÓGICA PARA FICAR DEPOIS DO DIA 03-02
-    aba_referencia = "Preço 03-02"
-    if aba_referencia in nomes_abas:
-        # A nova aba entra no índice da referência + 1 (logo à direita)
-        novo_indice = nomes_abas.index(aba_referencia) + 1
-    else:
-        # Se não achar a 03-02, coloca no final para garantir que não fique no início
-        novo_indice = len(nomes_abas)
-
-    data_ontem_texto = (data_alvo_dt - timedelta(days=1)).strftime("%d/%m/%Y")
-    if data_alvo_dt.weekday() == 0: 
-        data_ontem_texto = (data_alvo_dt - timedelta(days=3)).strftime("%d/%m/%Y")
-
-    print(f"✅ Aba base identificada: {aba_base.title}")
-
     try:
-        # 3. VERIFICAR SE O ALVO JÁ EXISTE E CRIAR
-        if novo_nome_aba in nomes_abas:
-            print(f"⚠️ A aba {novo_nome_aba} já existe. Partindo para os coletores.")
+        agora = datetime.now()
+        nomes_abas = [a.title for a in ss.worksheets()]
+        hoje_str = agora.strftime("%d-%m")
+
+        if any(nome.strip() == f"Preço {hoje_str}" for nome in nomes_abas):
+            data_alvo = proximo_dia_util(agora)
         else:
-            print(f"🔄 Criando aba {novo_nome_aba} na posição {novo_indice} (após {aba_referencia})...")
-            # Inserção na posição calculada para não ficar no início
-            nova_aba = ss.duplicate_sheet(aba_base.id, new_sheet_name=novo_nome_aba, insert_sheet_index=novo_indice)
-            
-            dados = nova_aba.get_all_values(value_render_option='FORMULA')
-            
-            # Atualizar datas nos cabeçalhos
-            indices_ontem, indices_hoje = [3, 7, 11, 15], [4, 8, 12, 16]
-            for col in indices_ontem: 
-                if len(dados[10]) > col: dados[10][col] = data_ontem_texto
-            for col in indices_hoje: 
-                if len(dados[10]) > col: dados[10][col] = data_alvo_texto
-            dados[3][2] = data_alvo_texto 
+            data_alvo = agora
+            while data_alvo.weekday() >= 5:
+                data_alvo += timedelta(days=1)
 
-            # Limpeza e Movimentação de dados
-            mapeamento = [(4, 3), (8, 7), (12, 11), (16, 15)]
-            intervalos = [(11, 21), (28, 45), (53, 56), (64, 76), (85, 86), (104, 114), (118, 133), (188, 190), (210, 217), (225, 227)]
-            
-            formatos_limpeza = []
-            for col_hoje, col_ontem in mapeamento:
-                col_dif = col_hoje + 1 
-                for inicio, fim in intervalos:
-                    intervalo_a1 = f"{gspread.utils.rowcol_to_a1(inicio + 1, col_hoje + 1)}:{gspread.utils.rowcol_to_a1(fim + 1, col_dif + 1)}"
-                    formatos_limpeza.append({
-                        "range": intervalo_a1,
-                        "format": {
-                            "backgroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0},
-                            "textFormat": {"foregroundColor": {"red": 0.0, "green": 0.0, "blue": 0.0}, "bold": False}
-                        }
-                    })
-                    for r in range(inicio, fim + 1):
-                        dados[r][col_ontem] = dados[r][col_hoje]
-                        if not str(dados[r][col_hoje]).startswith('='): dados[r][col_hoje] = ""
+        nome_novo = data_alvo.strftime("Preço %d-%m")
+        data_hoje = data_alvo.strftime("%d/%m/%Y")
+        data_ontem = dia_util_anterior(data_alvo).strftime("%d/%m/%Y")
 
-            nova_aba.update(dados, "A1", value_input_option='USER_ENTERED')
-            nova_aba.batch_format(formatos_limpeza)
-            print(f"✨ Aba {novo_nome_aba} pronta e posicionada!")
+        print("📅 Aba alvo:", nome_novo)
+        print("📆 Data anterior:", data_ontem)
+        print("📆 Data atual:", data_hoje)
 
-        # 4. RODAR COLETORES
-        print("🚀 Rodando coletores...")
-        for script in ["vibra.py", "shell.py", "ipiranga.py"]:
-            try:
-                subprocess.run(["python", script], check=True)
-            except Exception as e:
-                print(f"⚠️ Erro ao rodar {script}: {e}")
+        if nome_novo in nomes_abas:
+            print(f"⚠️ A aba {nome_novo} já existe.")
+            return
+
+        aba_base = encontrar_aba_base(ss.worksheets(), data_alvo)
+
+        print("🔄 Duplicando aba base...")
+        nova = ss.duplicate_sheet(
+            source_sheet_id=aba_base.id,
+            new_sheet_name=nome_novo
+        )
+
+        print("📥 Lendo conteúdo formatado...")
+        dados_formatados = nova.get(INTERVALO_LEITURA, value_render_option="FORMATTED_VALUE")
+
+        print("📥 Lendo conteúdo com fórmulas...")
+        dados_formulas = nova.get(INTERVALO_LEITURA, value_render_option="FORMULA")
+
+        print("🛠 Montando alterações seguras apenas nos blocos FOB...")
+        alteracoes = construir_alteracoes_seguras_fob(
+            dados_formatados=dados_formatados,
+            dados_formulas=dados_formulas,
+            data_ontem=data_ontem,
+            data_hoje=data_hoje
+        )
+
+        if alteracoes:
+            print(f"💾 Aplicando {len(alteracoes)} alterações...")
+            nova.batch_update(alteracoes, value_input_option="USER_ENTERED")
+            print(f"✅ Aba {nome_novo} criada e ajustada com segurança.")
+        else:
+            print("⚠️ Nenhuma alteração foi montada. A aba foi criada, mas nada foi editado.")
 
     except Exception as e:
-        print(f"❌ Erro na automação: {e}")
+        print(f"❌ Erro crítico: {repr(e)}")
+
 
 if __name__ == "__main__":
     preparar_aba()
