@@ -1,5 +1,8 @@
 import re
+import subprocess
+import sys
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -11,7 +14,7 @@ from gspread.utils import rowcol_to_a1
 # =========================================================
 ARQUIVO_JSON_GOOGLE = "dados-google.json"
 NOME_ARQUIVO_MODELO = "Preço teste TRRs %m/%y"
-INTERVALO_LEITURA = "A1:AD1000"
+INTERVALO_LEITURA = "A1:U1000"
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -114,6 +117,35 @@ def expandir_linha(linha, tamanho):
     return linha
 
 
+def indice_coluna_para_letra(indice_zero_based):
+    numero = indice_zero_based + 1
+    letras = ""
+
+    while numero > 0:
+        numero, resto = divmod(numero - 1, 26)
+        letras = chr(65 + resto) + letras
+
+    return letras
+
+
+def construir_remocoes_validacao_total(sheet_id):
+    # Limpa todas as validações do intervalo de trabalho (A1:AD1000).
+    return [{
+        "setDataValidation": {
+            "range": {
+                "sheetId": sheet_id,
+                "startRowIndex": 0,
+                "endRowIndex": 1000,
+                "startColumnIndex": 0,
+                "endColumnIndex": 30,
+            }
+        }
+    }]
+
+
+
+
+
 # =========================================================
 # LOCALIZAÇÃO DOS BLOCOS FOB
 # =========================================================
@@ -214,11 +246,12 @@ def linha_parece_dado_empresa(linha, col_empresa):
 # =========================================================
 def construir_alteracoes_seguras_fob(dados_formatados, dados_formulas, data_ontem, data_hoje):
     alteracoes = []
+    blocos_formatacao = []
     blocos = localizar_blocos_fob(dados_formatados)
 
     if not blocos:
         print("⚠️ Nenhum bloco FOB foi encontrado.")
-        return alteracoes
+        return alteracoes, blocos_formatacao
 
     print(f"📦 Blocos FOB encontrados: {len(blocos)}")
 
@@ -256,6 +289,12 @@ def construir_alteracoes_seguras_fob(dados_formatados, dados_formulas, data_onte
 
         inicio_dados = linha_datas + 1
         max_col = max(g[2] for g in grupos)
+
+        blocos_formatacao.append({
+            "inicio_dados": inicio_dados,
+            "fim": fim,
+            "grupos": grupos,
+        })
 
         print(f"✅ Bloco FOB pronto para edição: {titulo}")
 
@@ -297,7 +336,7 @@ def construir_alteracoes_seguras_fob(dados_formatados, dados_formulas, data_onte
 
                 # NÃO mexe na coluna Dif. (R$)
 
-    return alteracoes
+    return alteracoes, blocos_formatacao
 
 
 # =========================================================
@@ -347,19 +386,28 @@ def preparar_aba():
         dados_formulas = nova.get(INTERVALO_LEITURA, value_render_option="FORMULA")
 
         print("🛠 Montando alterações seguras apenas nos blocos FOB...")
-        alteracoes = construir_alteracoes_seguras_fob(
+        alteracoes, blocos_formatacao = construir_alteracoes_seguras_fob(
             dados_formatados=dados_formatados,
             dados_formulas=dados_formulas,
             data_ontem=data_ontem,
             data_hoje=data_hoje
         )
 
+        remocoes_validacao = construir_remocoes_validacao_total(sheet_id=nova.id)
+
         if alteracoes:
             print(f"💾 Aplicando {len(alteracoes)} alterações...")
             nova.batch_update(alteracoes, value_input_option="USER_ENTERED")
+
+            ss.batch_update({"requests": remocoes_validacao })
+            print("🧹 Todas as validações de dados foram removidas (A1:U1000).")
+
             print(f"✅ Aba {nome_novo} criada e ajustada com segurança.")
         else:
-            print("⚠️ Nenhuma alteração foi montada. A aba foi criada, mas nada foi editado.")
+            ss.batch_update({"requests": remocoes_validacao })
+            print("🧹 Todas as validações de dados foram removidas (A1:U1000).")
+            print(" Formatação dos blocos FOB foi renovada para o novo dia.")
+            print(" Nenhuma alteração foi montada. A aba foi criada, mas nada foi editado.")
 
     except Exception as e:
         print(f"❌ Erro crítico: {repr(e)}")
@@ -367,3 +415,17 @@ def preparar_aba():
 
 if __name__ == "__main__":
     preparar_aba()
+
+    # Executa a coleta da Vibra em seguida, usando o mesmo interpretador Python.
+    caminho_vibra = Path(__file__).resolve().parent / "vibra.py"
+
+    if not caminho_vibra.exists():
+        print(f"❌ vibra.py não encontrado em: {caminho_vibra}")
+    else:
+        print("\n🚀 Iniciando processo da Vibra...")
+        resultado = subprocess.run([sys.executable, str(caminho_vibra)])
+
+        if resultado.returncode == 0:
+            print("✅ Processo da Vibra finalizado com sucesso.")
+        else:
+            print(f"❌ Processo da Vibra finalizou com erro (código {resultado.returncode}).")
