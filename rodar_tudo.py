@@ -114,6 +114,68 @@ def expandir_linha(linha, tamanho):
     return linha
 
 
+def texto_vizinho(dados, linha, col_inicio, col_fim):
+    if linha < 0 or linha >= len(dados):
+        return ""
+
+    linha_dados = dados[linha]
+    inicio = max(0, col_inicio)
+    fim = min(len(linha_dados), col_fim + 1)
+    if inicio >= fim:
+        return ""
+
+    return " ".join(str(x).strip() for x in linha_dados[inicio:fim] if str(x).strip())
+
+
+def grupo_eh_s500(dados_formatados, linha_datas, col_ontem, col_dif):
+    # Em planilhas com células mescladas, o texto do cabeçalho pode cair 1-2 linhas acima.
+    for linha_header in (linha_datas - 1, linha_datas - 2):
+        cabecalho = normalizar(texto_vizinho(dados_formatados, linha_header, col_ontem - 2, col_dif + 2))
+        if "S500" in cabecalho:
+            return True
+    return False
+
+
+def construir_remocoes_validacao_suape(dados_formatados, sheet_id):
+    requests = []
+    blocos = localizar_blocos_fob(dados_formatados)
+
+    for titulo, linha_titulo, col_titulo in blocos:
+        if "SUAPE" not in normalizar(titulo):
+            continue
+
+        fim = achar_fim_bloco_fob(dados_formatados, linha_titulo, col_titulo)
+        linha_datas, grupos = encontrar_linha_datas_por_offset(
+            dados_formatados,
+            linha_titulo,
+            fim,
+            col_titulo
+        )
+
+        if linha_datas is None or not grupos:
+            continue
+
+        inicio_dados = linha_datas + 1
+
+        for col_ontem, col_hoje, col_dif in grupos:
+            if not grupo_eh_s500(dados_formatados, linha_datas, col_ontem, col_dif):
+                continue
+
+            requests.append({
+                "setDataValidation": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": inicio_dados,
+                        "endRowIndex": fim + 1,
+                        "startColumnIndex": col_hoje,
+                        "endColumnIndex": col_hoje + 1,
+                    }
+                }
+            })
+
+    return requests
+
+
 # =========================================================
 # LOCALIZAÇÃO DOS BLOCOS FOB
 # =========================================================
@@ -357,6 +419,15 @@ def preparar_aba():
         if alteracoes:
             print(f"💾 Aplicando {len(alteracoes)} alterações...")
             nova.batch_update(alteracoes, value_input_option="USER_ENTERED")
+
+            remocoes_validacao = construir_remocoes_validacao_suape(
+                dados_formatados=dados_formatados,
+                sheet_id=nova.id,
+            )
+            if remocoes_validacao:
+                ss.batch_update({"requests": remocoes_validacao})
+                print(f"🧹 Validação removida no S500 de Suape ({len(remocoes_validacao)} faixa(s)).")
+
             print(f"✅ Aba {nome_novo} criada e ajustada com segurança.")
         else:
             print("⚠️ Nenhuma alteração foi montada. A aba foi criada, mas nada foi editado.")

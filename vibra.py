@@ -2,7 +2,7 @@ import time
 import re
 import gspread
 from datetime import datetime
-from oauth2client.service_account import ServiceAccountCredentials
+from google.oauth2.service_account import Credentials
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
@@ -13,35 +13,40 @@ from selenium.webdriver.support import expected_conditions as EC
 # --- CONFIGURAÇÕES ---
 data_hoje = datetime.now().strftime("%d-%m") 
 # Usando o ID da planilha oficial para garantir a gravação
-ID_PLANILHA_OFICIAL = "1bUvHLoUAmT4vcFy7J_qN5SendCl72Ih7ZLnF6UGd8VI" 
+ID_PLANILHA_OFICIAL = "1T8p8RlKpuXOTuOjJCtLlBxLDNzwGRgZ6Li6IbPuChuE" 
 NOME_ABA_HOJE = f"Preço {data_hoje}"
 ABA_MODELO = "Preço 20-01" 
 ARQUIVO_JSON_GOOGLE = "dados-google.json"
 
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+
 BASES_VIBRA = {
     "TERESINA": {
-        "usuario": "6074", "senha": "DERIVADOS02", 
-        "celula_s10": "E13", "celula_s500": "I13"
+        "usuario": "1846995", "senha": "NEOAGRO01", 
+        "celula_s10_1": "E13", "celula_s500_1": "I13","celula_gasolina_1": "M13",
+        "celula_s10_2": "E191", "celula_s500_2": "I191","celula_gasolina_2": "M191"
     },
     "ACAILANDIA": {
-        "usuario": "1772103", "senha": "DERIVADOS02", 
-        "celula_s10_1": "E30", "celula_s500_1": "I30",
-        "celula_s10_2": "E55", "celula_s500_2": "I55"
+        "usuario": "1849770", "senha": "NEOAGRO01", 
+        "celula_s10_1": "E30", "celula_s500_1": "I30","celula_gasolina_1": "M30",
+        "celula_s10_2": "E56", "celula_s500_2": "I56","celula_gasolina_2": "M56"
     },
     "PORTO_NACIONAL": {
-        "usuario": "1775785", "senha": "DERIVADOS02", 
-        "celula_s10": "E66", "celula_s500": "I66"
+        "usuario": "1849784", "senha": "NEOAGRO01", 
+        "celula_s10": "E67", "celula_s500": "I67","celula_gasolina": "M67"
     },
     "LUIS_EDUARDO": { 
         "usuario": "1845988", "senha": "DERIVADOS02",
-        "celula_s10_1": "E120", "celula_s500_1": "I120",
-        "celula_s10_2": "E106", "celula_s500_2": "I106",
-        "celula_s10_3": "E190"
+        "celula_s10_1": "E107", "celula_s500_1": "I107","celula_gasolina_1": "M107",
+        "celula_s10_2": "E121", "celula_s500_2": "I121","celula_gasolina_2": "M121"
     },
     "BELEM": {
-        "usuario": "1846285", "senha": "DERIVADOS02",
-        "celula_s10_1": "E212", "celula_s500_1": "I212",
-        "celula_s10_2": "E227", "celula_s500_2": "I227"
+        "usuario": "1849770", "senha": "NEOAGRO01",
+        "celula_s10_1": "E213", "celula_s500_1": "I213","celula_gasolina_1": "M213",
+        "celula_s10_2": "E228", "celula_s500_2": "I228","celula_gasolina_2": "M228"
     }
 }
 
@@ -68,10 +73,19 @@ def aceitar_todos_cookies_vibra(driver):
         except: continue
 
 def obter_aba_planilha():
-    escopo = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    creds = ServiceAccountCredentials.from_json_keyfile_name(ARQUIVO_JSON_GOOGLE, escopo)
+    creds = Credentials.from_service_account_file(ARQUIVO_JSON_GOOGLE, scopes=SCOPES)
     client = gspread.authorize(creds)
-    planilha = client.open_by_key(ID_PLANILHA_OFICIAL)
+    print(f"🔐 Conta de serviço (Vibra): {creds.service_account_email}")
+    print(f"📄 Abrindo planilha por ID: {ID_PLANILHA_OFICIAL}")
+
+    try:
+        planilha = client.open_by_key(ID_PLANILHA_OFICIAL)
+    except gspread.exceptions.SpreadsheetNotFound as e:
+        raise RuntimeError(
+            "Planilha não encontrada ou sem acesso para esta conta de serviço. "
+            f"Compartilhe a planilha com {creds.service_account_email}."
+        ) from e
+
     try:
         return planilha.worksheet(NOME_ABA_HOJE)
     except gspread.exceptions.WorksheetNotFound:
@@ -90,7 +104,7 @@ def salvar_no_google_direto(celula, valor):
         aba.update_acell(celula, extrair_apenas_numeros(valor))
         print(f"📊 Salvo na {celula}: {valor}")
     except Exception as e:
-        print(f"❌ Erro ao salvar {celula}: {e}")
+        print(f"❌ Erro ao salvar {celula}: {repr(e)}")
 
 def rodar_coleta(base_id):
     conf = BASES_VIBRA[base_id]
@@ -137,6 +151,7 @@ def rodar_coleta(base_id):
 
         count_s10 = 0
         count_s500 = 0
+        count_gasolina = 0
 
         for item in itens:
             try:
@@ -154,9 +169,14 @@ def rodar_coleta(base_id):
                     count_s500 += 1
                     celula = conf.get(f"celula_s500_{count_s500}", conf.get("celula_s500") if count_s500 == 1 else None)
                     if celula: salvar_no_google_direto(celula, valor_texto)
+
+                elif "GASOLINA" in texto_item:
+                    count_gasolina += 1
+                    celula = conf.get(f"celula_gasolina_{count_gasolina}", conf.get("celula_gasolina") if count_gasolina == 1 else None)
+                    if celula: salvar_no_google_direto(celula, valor_texto)
             except: continue
         
-        if count_s10 == 0 and count_s500 == 0:
+        if count_s10 == 0 and count_s500 == 0 and count_gasolina == 0:
             print(f"⚠️ Atenção: Preços não localizados para {base_id}.")
 
     except Exception as e:
