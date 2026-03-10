@@ -11,6 +11,7 @@ Este repositório possui três fluxos principais:
    - Duplica uma aba base anterior.
    - Atualiza cabeçalhos de data nos blocos `FOB - ...`.
    - Move valores de "hoje" para "ontem" com regras seguras.
+   - Ao finalizar, dispara automaticamente o `vibra.py`.
 
 2. **Coleta da Vibra e gravação direta** (`vibra.py`)
    - Faz login por base na Vibra.
@@ -79,7 +80,7 @@ No `dados-google.json`, valide:
 
 ## Como executar
 
-## 1) Preparar aba diária (rodar_tudo)
+## 1) Preparar aba diária + iniciar Vibra (rodar_tudo)
 
 ```bash
 python rodar_tudo.py
@@ -96,12 +97,21 @@ python rodar_tudo.py
   - Copia valores da coluna de hoje para ontem.
   - Limpa coluna de hoje **somente se não for fórmula**.
   - Não altera coluna de diferença (`Dif.`).
+- Remove validações de dados no intervalo configurado da nova aba.
+- Executa `vibra.py` em sequência usando o mesmo interpretador Python.
+
+### Comportamento de execução encadeada
+
+- Se `vibra.py` não existir na pasta do projeto, o script informa no terminal e encerra.
+- Se `vibra.py` retornar erro, o código de saída é exibido no final da execução.
 
 ## 2) Coletar Vibra
 
 ```bash
 python vibra.py
 ```
+
+> Use este comando quando quiser rodar somente a coleta Vibra, sem preparar uma nova aba via `rodar_tudo.py`.
 
 ### Fluxo atual do `vibra.py`
 
@@ -203,9 +213,14 @@ Correção:
 
 ## Ordem recomendada de execução diária
 
-1. `python rodar_tudo.py` (garante a aba do dia pronta)
-2. `python vibra.py` (preenche preços Vibra)
-3. `python ipiranga.py` (preenche preços Ipiranga no bloco alvo)
+1. `python rodar_tudo.py` (prepara a aba do dia e já inicia o fluxo da Vibra automaticamente)
+2. `python ipiranga.py` (preenche preços Ipiranga no bloco alvo, se aplicável)
+
+Fluxo alternativo (manual):
+
+1. `python rodar_tudo.py`
+2. `python vibra.py`
+3. `python ipiranga.py`
 
 ---
 
