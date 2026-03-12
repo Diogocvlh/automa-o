@@ -15,8 +15,8 @@ from gspread.utils import rowcol_to_a1
 # CONFIGURAÇÕES
 # =========================================================
 ARQUIVO_JSON_GOOGLE = "dados-google.json"
-NOME_ARQUIVO_MODELO = "Preço TRRs %m/%y"
-ID_PLANILHA_OFICIAL = "1Va1byiasuU-k9dCDmY9mcsUzvlFXmVTCBfuL9IaJq9Y" 
+NOME_ARQUIVO_MODELO = "Preço teste TRRs %m/%y"
+ID_PLANILHA_OFICIAL = "1T8p8RlKpuXOTuOjJCtLlBxLDNzwGRgZ6Li6IbPuChuE" 
 INTERVALO_LEITURA = "A1:U1000"
 
 SCOPES = [

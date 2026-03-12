@@ -34,7 +34,7 @@ class BaseConfig:
     uf_cidade: str
     ponto_entrega: str
     titulo_bloco_planilha: str
-
+    opcao_dropdown_base: str 
 
 BASE_TESTE = BaseConfig(
     nome_base="TERESINA",
@@ -42,6 +42,7 @@ BASE_TESTE = BaseConfig(
     uf_cidade="PI - Urucui",
     ponto_entrega="01 | Zona Rural",
     titulo_bloco_planilha="FOB - BASE TERESINA - PI - NEOAGRO",
+    opcao_dropdown_base="Escritorio De Teresina" 
 )
 
 
@@ -198,55 +199,82 @@ def escolher_cnpj(driver, base: BaseConfig):
     time.sleep(4)
 
 
-def abrir_pedido_combustivel(driver):
-    w = wait(driver, 20)
+def acessar_menu_registrar_pedido(driver):
+    print("-> Navegando pelo menu lateral até 'Registrar pedido'...")
+    w = wait(driver, 15)
+    
+    try:
+        # Como o portal Ipiranga mantém a sessão pelo CNPJ, forçar a URL da tela de pedidos 
+        # costuma ser a forma mais rápida e à prova de falhas (evita menus travados).
+        url_pedidos = "https://redeipiranga.com.br/wps/myportal/redeipiranga/pedidos/combustivel/registrarpedido/"
+        driver.get(url_pedidos)
+        time.sleep(5)
+    except Exception as e:
+        raise RuntimeError(f"Falha ao acessar a tela de Registrar Pedido: {e}")
 
-    tentativas = [
-        "//button[contains(., 'Pedido de Combustível')]",
-        "//*[contains(., 'Pedido de Combustível')]",
-        "//a[contains(., 'Pedido de Combustível')]",
-    ]
+def selecionar_base_no_pedido(driver, base: BaseConfig):
+    print(f"-> Selecionando a base '{base.opcao_dropdown_base}' no formulário...")
+    w = wait(driver, 15)
+    
+    try:
+        # Procura a caixinha de Base (dropdown) e clica nela
+        dropdown_base = w.until(EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), 'Base')]/following::*[contains(@class, 'select') or contains(@class, 'dropdown') or self::input][1]")))
+        driver.execute_script("arguments[0].click();", dropdown_base)
+        time.sleep(2)
+        
+        # Clica na opção com o nome da base
+        opcao = w.until(EC.element_to_be_clickable((By.XPATH, f"//*[contains(text(), '{base.opcao_dropdown_base}')]")))
+        driver.execute_script("arguments[0].click();", opcao)
+        
+        # Aguarda 5 segundos para a tabela de preços carregar na tela
+        print("-> Base selecionada. Aguardando tabela de preços carregar...")
+        time.sleep(5) 
+    except Exception as e:
+        print(f"-> Não foi possível selecionar a base no dropdown. Erro: {e}")
+        # Tira print caso dê erro no dropdown
+        driver.save_screenshot("erro_dropdown_base.png")
 
-    for xp in tentativas:
-        try:
-            el = w.until(EC.element_to_be_clickable((By.XPATH, xp)))
-            driver.execute_script("arguments[0].click();", el)
-            time.sleep(5)
-            return
-        except Exception:
-            continue
-
-    raise RuntimeError("Não consegui abrir 'Pedido de Combustível'.")
-
-
-def capturar_precos_retira(driver):
+def capturar_precos_com_desconto(driver):
+    print("-> Capturando preços da tabela e aplicando R$ 0,20 de desconto...")
+    
     produtos_alvo = {
         "Diesel S10 Bb": "S10",
         "Diesel S500 Bb": "S500",
         "Gasolina Comum Bb": "GASOLINA",
     }
 
-    resultados = {
-        "S10": None,
-        "S500": None,
-        "GASOLINA": None,
-    }
+    resultados = {"S10": None, "S500": None, "GASOLINA": None}
 
     for nome_tela, chave in produtos_alvo.items():
         try:
+            # Encontra a linha do produto na tabela
             el_produto = driver.find_element(By.XPATH, f"//*[contains(., '{nome_tela}')]")
-            linha = el_produto.find_element(By.XPATH, "./ancestor::div[2]")
+            linha = el_produto.find_element(By.XPATH, "./ancestor::div[contains(@class, 'row') or @role='row' or ancestor::tr][1]")
             texto = " ".join(linha.text.split())
 
+            # Acha todos os números com vírgula na linha (Ex: 6,7438 e 6,1681)
             precos = re.findall(r"\d+,\d+", texto)
-            retira = precos[1] if len(precos) >= 2 else None
-
-            resultados[chave] = retira
+            
+            if len(precos) >= 2:
+                # O preço RETIRA é o segundo da linha
+                retira_str = precos[1] 
+                
+                # Converte para matemática (ex: "6,1681" vira 6.1681)
+                valor_float = float(retira_str.replace(",", "."))
+                
+                # APLICA O DESCONTO DE R$ 0,20
+                valor_com_desconto = valor_float - 0.20
+                
+                # Guarda o valor arredondado para 4 casas decimais (O gspread aceita float direto)
+                resultados[chave] = round(valor_com_desconto, 4)
+                
+                print(f"   [OK] {chave}: LIDO = R$ {retira_str} | COM DESCONTO = R$ {resultados[chave]}")
+            else:
+                print(f"   [AVISO] Não achei 2 preços na linha do {chave}.")
         except Exception:
-            resultados[chave] = None
+            print(f"   [FALHA] Produto '{nome_tela}' não encontrado na tabela.")
 
     return resultados
-
 
 # =========================================================
 # GOOGLE SHEETS
@@ -369,6 +397,7 @@ def escrever_precos_ipiranga(ss, base: BaseConfig, precos):
 # =========================================================
 # FLUXO PRINCIPAL
 # =========================================================
+# Encontre a função main() no seu código e deixe-a assim:
 def main():
     driver = iniciar_driver()
 
@@ -379,10 +408,14 @@ def main():
 
         print(f"\nProcessando base: {BASE_TESTE.nome_base}")
         escolher_cnpj(driver, BASE_TESTE)
-        abrir_pedido_combustivel(driver)
-
-        precos = capturar_precos_retira(driver)
-        print("Preços capturados:", precos)
+        
+        # NOVOS PASSOS AQUI:
+        acessar_menu_registrar_pedido(driver)
+        selecionar_base_no_pedido(driver, BASE_TESTE)
+        
+        # CAPTURA COM DESCONTO
+        precos = capturar_precos_com_desconto(driver)
+        print("\nPreços finais a gravar na planilha:", precos)
 
         escrever_precos_ipiranga(ss, BASE_TESTE, precos)
 
@@ -391,7 +424,6 @@ def main():
     finally:
         input("Pressione ENTER para fechar o navegador...")
         driver.quit()
-
 
 if __name__ == "__main__":
     main()
